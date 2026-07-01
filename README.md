@@ -20,27 +20,6 @@ the **IMAP (Integrative Maximisation of Aggregated Preferences)** aggregator:
 | IGS-BRKGA | Biased Random-Key GA | Combinatorial / constraint-heavy problems (HVASP, MO-VRPTW) |
 | IGS-SI | Swarm Intelligence (Ant Colony Optimisation) | Graph-based and routing optimisation |
 
-## What is IMAP?
-
-The IMAP preference function `P_{k,i}` maps an actor-independent performance function
-vector `F` to a preference score in `[0, 100]` for actor `k`, acting component-wise on
-the `i`-th performance function. The relatively worst and best performance levels are
-assigned preference scores of `0` and `100` respectively — an arbitrary reference
-scaling, since preferences possess only relative meaning within a one-dimensional affine
-space.
-
-In this solver, IMAP is realised through the **a-fine-aggregator** (`a_fine_aggregator`),
-which for a pool of alternatives:
-
-1. Transposes the preference matrix so rows are individuals and columns are criteria.
-2. Z-score normalises each criterion (`z = (x − μ) / s`; if `s = 0`, uses `s = 1e-6`).
-3. Computes the representative preference score `P* = Σ wᵢ · zᵢ` (with `Σ wᵢ = 1`).
-4. Min-max scales `P*` to `[0, 100]` (returns `50` for all if every `P*` is identical).
-
-The GA then maximises these aggregated preference scores across generations, so the
-endpoints `0` and `100` represent the relative minimum and maximum within the alternative
-set rather than absolute preference origins.
-
 ## Key features
 
 - **Stakeholder-centric**: each stakeholder defines custom preference functions per
