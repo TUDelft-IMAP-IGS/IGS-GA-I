@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -788,9 +788,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "deap" },
+    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "matplotlib", version = "3.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 
 [package.optional-dependencies]
@@ -815,9 +820,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "deap", specifier = ">=1.4.3" },
+    { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "matplotlib", marker = "extra == 'examples'", specifier = ">=3.10.3" },
     { name = "notebook", marker = "extra == 'examples'", specifier = ">=7.4.2" },
     { name = "numpy", specifier = ">=2.2.5" },
+    { name = "scipy", specifier = ">=1.15.3" },
     { name = "scipy", marker = "extra == 'examples'", specifier = ">=1.15.3" },
 ]
 provides-extras = ["examples"]

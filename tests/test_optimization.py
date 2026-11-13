@@ -4,8 +4,9 @@ import random
 
 import numpy as np
 import pytest
+from deap import base, creator, tools
 
-from igs_ga.optimization.optimization import a_fine_aggregator, run_optimization
+from igs_ga.optimization.optimization import a_fine_aggregator, custom_eaMuPlusLambda, run_optimization
 
 
 def test_a_fine_aggregator():
@@ -124,6 +125,95 @@ def test_optimization_with_mixed_types():
     assert abs(result['best_solution'][0]) < 1.0
     # Integer variable should be close to 5.
     assert abs(result['best_solution'][1] - 5) <= 1
+
+
+def test_custom_eaMuPlusLambda_convergence_uses_cached_hof_fitness():
+    """Convergence check should not re-evaluate Hall of Fame members one-by-one."""
+    # Use dedicated DEAP classes for this test to avoid collisions with other tests.
+    if hasattr(creator, 'FitnessMinDebug'):
+        delattr(creator, 'FitnessMinDebug')
+    if hasattr(creator, 'IndividualDebug'):
+        delattr(creator, 'IndividualDebug')
+
+    creator.create("FitnessMinDebug", base.Fitness, weights=(-1.0,))
+    creator.create("IndividualDebug", list, fitness=creator.FitnessMinDebug)
+
+    toolbox = base.Toolbox()
+    toolbox.register("clone", lambda ind: creator.IndividualDebug(ind))
+    toolbox.register(
+        "mate",
+        lambda a, b: (creator.IndividualDebug(a), creator.IndividualDebug(b)),
+    )
+    toolbox.register("mutate", lambda ind: (creator.IndividualDebug(ind),))
+    toolbox.register("select", tools.selBest)
+
+    calls = {"count": 0}
+
+    def evaluate(ind):
+        calls["count"] += 1
+        return (float(sum(ind)),)
+
+    toolbox.register("evaluate", evaluate)
+    toolbox.register("map", map)
+
+    population = [creator.IndividualDebug([i]) for i in range(4)]
+    halloffame = tools.HallOfFame(maxsize=2, similar=lambda a, b: a == b)
+
+    custom_eaMuPlusLambda(
+        population=population,
+        toolbox=toolbox,
+        mu=4,
+        lambda_=4,
+        cxpb=1.0,
+        mutpb=0.0,
+        ngen=1,
+        halloffame=halloffame,
+        verbose=False,
+    )
+
+    # Expected calls without extra Hall-of-Fame re-evaluation during convergence check:
+    # initial pop (4) + offspring invalid (4) + candidate pool (offspring 4 + elites 2 + pop 4) = 18.
+    assert calls["count"] == 18
+
+
+def test_custom_eaMuPlusLambda_does_not_stop_on_gen1_spread_tie():
+    """Spread-based convergence should not be allowed to stop at generation 1."""
+    if hasattr(creator, 'FitnessMinDebug2'):
+        delattr(creator, 'FitnessMinDebug2')
+    if hasattr(creator, 'IndividualDebug2'):
+        delattr(creator, 'IndividualDebug2')
+
+    creator.create("FitnessMinDebug2", base.Fitness, weights=(-1.0,))
+    creator.create("IndividualDebug2", list, fitness=creator.FitnessMinDebug2)
+
+    toolbox = base.Toolbox()
+    toolbox.register("clone", lambda ind: creator.IndividualDebug2(ind))
+    toolbox.register(
+        "mate",
+        lambda a, b: (creator.IndividualDebug2(a), creator.IndividualDebug2(b)),
+    )
+    toolbox.register("mutate", lambda ind: (creator.IndividualDebug2(ind),))
+    toolbox.register("select", tools.selBest)
+    toolbox.register("evaluate", lambda ind: (0.0,))
+    toolbox.register("map", map)
+
+    population = [creator.IndividualDebug2([i]) for i in range(4)]
+    halloffame = tools.HallOfFame(maxsize=2, similar=lambda a, b: a == b)
+
+    _result, logbook = custom_eaMuPlusLambda(
+        population=population,
+        toolbox=toolbox,
+        mu=4,
+        lambda_=4,
+        cxpb=1.0,
+        mutpb=0.0,
+        ngen=2,
+        halloffame=halloffame,
+        verbose=False,
+    )
+
+    # The algorithm should not terminate at generation 1 due only to spread ties.
+    assert logbook[-1]["gen"] == 2
 
 
 if __name__ == "__main__":

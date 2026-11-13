@@ -6,27 +6,33 @@ from typing import Callable, Dict, List, Optional, Union
 
 import numpy as np
 
-from igs_ga.optimization.optimization import a_fine_aggregator, run_optimization
+from igs_ga.optimization.imap import normalize_constraints, run_imap_optimization
+
+N_PREFIX_ITEMS = 2  # simulation returns (env, objects, *performance_values)
 
 
 class Preferendus:
     """Optimization Engine decorator for simulations following the IMAP method.
 
-    This decorator wraps around a simulation function to automatically optimize decision variables
-    by maximizing stakeholder utility across multiple objectives. It uses a Genetic Algorithm (GA)
-    to find the optimal decision variables that balance stakeholder preferences.
+    This decorator wraps around a simulation function to automatically optimise decision variables
+    by maximising the aggregated preference score across all stakeholders. It uses a Genetic
+    Algorithm (GA) to find the optimal decision variables that balance stakeholder preferences.
 
     Parameters
     ----------
     preference_functions : Dict[int, Dict[str, Callable]]
         A nested dictionary mapping stakeholder IDs to their respective objective preference functions.
         Each preference function should accept a single numeric argument (the objective value) and
-        return a numeric preference score (typically 0-1, higher is better).
+        return a numeric preference score (0-100, higher is better). Every (stakeholder, objective)
+        preference function is aggregated as its own row in the a-fine aggregator.
+        The simulation must return the objective values in the order in which the objectives first
+        appear in this dictionary.
 
-        Example: {1: {"cost": lambda c: max(0, 1-c/1000), "time": lambda t: max(0, 1-t/24)}
+        Example: {1: {"cost": lambda c: max(0, 100-c/10), "time": lambda t: max(0, 100-t/0.24)}
 
     stakeholder_weights : List[float]
-        A list of weights representing the relative importance of each stakeholder.
+        A list of weights representing the relative importance of each stakeholder, in the same
+        order as the stakeholders in `preference_functions`.
         These weights will be normalized internally to sum to 1.
 
         Example: [0.6, 0.4] for a scenario with two stakeholders where the first stakeholder has 60% influence and the second stakeholder has 40%.
@@ -40,19 +46,29 @@ class Preferendus:
     optimization_options : Dict, optional
         A dictionary specifying Genetic Algorithm parameters:
         - population_size (int): Number of individuals in the GA population (default: 20)
-        - generations (int): Number of generations to run the GA (default: 10)
-        - crossover_rate (float): Probability of crossover operation (default: 0.7)
-        - mutation_rate (float): Probability of mutation operation (default: 0.2)
+        - generations (int): Maximum number of generations to run the GA (default: 10)
+        - crossover_rate (float): Probability that a float variable is crossed over (default: 0.7)
+        - mutation_rate (float): Probability that a child is mutated; the per-gene mutation rate
+          is self-adaptive (default: 1.0)
         - tournament_size (int): Number of individuals competing in tournament selection (default: 3)
+        - hall_of_fame_size (int): Number of all-time-best designs re-injected into every generation;
+          the hall of fame itself keeps every generation's best design (default: 10)
+        - max_stall (int): Stop after this many generations without a new best solution (default: 100)
+        - strict (bool or None): Rerun filter: True keeps scores above 70, False above 40, and
+          re-scores them among themselves; None disables the filter (default: None)
         - suppress_warnings (bool): Whether to suppress warnings during optimization (default: True)
         - suppress_logging (bool): Whether to suppress logging below ERROR level during optimization (default: True)
 
-    constraints : List[Callable[[list], bool]], optional
-        A list of constraint functions. Each function takes a decision variable list `x` and returns
-        True if the solution is feasible, False otherwise. Infeasible solutions receive a large
-        penalty in the fitness function.
+    constraints : List, optional
+        A list of constraints. Each is either a function that takes the decision variable list `x`
+        and returns True if the solution is feasible, or a tuple ('ineq', f) with f(x) <= 0
+        feasible, or ('eq', f) with f(x) == 0 feasible.
 
-        Example: [lambda x: x[0] >= 1, lambda x: sum(x) <= 100]
+        Example: [lambda x: x[0] >= 1, ('ineq', lambda x: sum(x) - 100)]
+
+    cons_handler : str, optional
+        'simple' (default) ranks infeasible solutions by the number of violated constraints;
+        'CND' (Coello non-dominance) ranks them by that number, then by the violation magnitude.
 
     variable_types : List[Union[type, str]], optional
         A list specifying the type (`int` or `float`) for each decision variable. This allows
@@ -74,8 +90,8 @@ class Preferendus:
     Examples
     --------
     >>> stakeholder_preferences = {
-    ...     1: {"cost": lambda c: max(0, 1-c/10000), "time": lambda t: max(0, 1-t/48)},
-    ...     2: {"cost": lambda c: max(0, 1-c/5000), "time": lambda t: max(0, 1-t/24)}
+    ...     1: {"cost": lambda c: max(0, 100-c/100), "time": lambda t: max(0, 100-t/0.48)},
+    ...     2: {"cost": lambda c: max(0, 100-c/50), "time": lambda t: max(0, 100-t/0.24)}
     ... }
     >>> @Preferendus(
     ...     preference_functions=stakeholder_preferences,
@@ -101,8 +117,15 @@ class Preferendus:
             constraints: List[Callable[[list], bool]] = None,
             variable_types: Optional[List[Union[type, str]]] = None,
             value_range: List[tuple] = None,
+            cons_handler: str = "simple",
     ):
         self.preference_functions = preference_functions
+
+        if len(stakeholder_weights) != len(preference_functions):
+            raise ValueError(
+                f"{len(stakeholder_weights)} stakeholder weights given for "
+                f"{len(preference_functions)} stakeholders in preference_functions."
+            )
 
         # Normalize stakeholder weights to sum to 1
         total_weight = sum(stakeholder_weights)
@@ -127,16 +150,22 @@ class Preferendus:
             'population_size': 20,
             'generations': 10,
             'crossover_rate': 0.7,
-            'mutation_rate': 0.2,
+            'mutation_rate': 1.0,
             'tournament_size': 3,
-            # GA-backbone elitism setting (general GA concept, not an IGS-method term):
+            # Generation bests are never removed from the hall of fame; this many are re-injected each generation
             'hall_of_fame_size': 10,
+            'max_stall': 100,
+            'strict': None,
             'suppress_warnings': True,
             'suppress_logging': True
         }
         if optimization_options:
             self.optimization_options.update(optimization_options)
         self.constraints = constraints if constraints is not None else []
+        normalize_constraints(self.constraints)
+        if cons_handler not in ("simple", "CND"):
+            raise ValueError("cons_handler must be 'simple' or 'CND'.")
+        self.cons_handler = cons_handler
         self.variable_types = variable_types
         if value_range is None:
             raise ValueError("value_range must be provided as a list of tuples.")
@@ -164,14 +193,14 @@ class Preferendus:
 
             When called, the wrapped function returns a dictionary containing:
             - 'x_opt': List of optimal decision variables found by the GA
-            - 'utility': Overall utility score achieved with the optimal solution
+            - 'utility': Aggregated IMAP preference score of the optimal solution
             - 'simulation_results': Complete results from running the simulation with optimal variables
 
         Notes
         -----
         - The first call to the wrapped function runs a full optimization.
         - The optimization process involves multiple simulation runs to evaluate different solutions.
-        - The GA attempts to maximize the global dby balancing all stakeholder preferences.
+        - The GA maximises the aggregated preference score by balancing all stakeholder preferences.
         - If constraints are provided, infeasible solutions are penalized.
         - Warnings and logging below ERROR level can be automatically suppressed during optimization.
 
@@ -196,218 +225,63 @@ class Preferendus:
                     root_logger.setLevel(logging.ERROR)
 
                 try:
-                    # Collect all objectives
-                    all_objectives = set()
-                    for prefs in self.preference_functions.values():
-                        all_objectives.update(prefs.keys())
-                    all_objectives = sorted(all_objectives)
+                    # Objectives in the order in which they first appear; the simulation returns them in this order
+                    objectives = list(dict.fromkeys(
+                        obj for prefs in self.preference_functions.values() for obj in prefs
+                    ))
 
-                    # Determine number of decision variables
-                    initial_x = [1] * 5
+                    # One aggregation row per (stakeholder, objective) preference function: w'_k,i = w_k * w_k,i
+                    rows = []
+                    for s_weight, (s_id, prefs) in zip(self.stakeholder_weights, self.preference_functions.items()):
+                        obj_weights = self.objective_weights[s_id]
+                        for obj, preference_function in prefs.items():
+                            weight = s_weight * obj_weights.get(obj, 1.0)
+                            if weight > 0:
+                                rows.append((obj, preference_function, weight))
+                    total_weight = sum(weight for _, _, weight in rows)
+                    if total_weight <= 0:
+                        raise ValueError("At least one stakeholder objective must have a positive weight.")
+                    row_weights = [weight / total_weight for _, _, weight in rows]
+
+                    # Initial guess: first positional argument, else a sequence default of the simulation function
+                    initial_x = None
                     if args and hasattr(args[0], '__len__'):
-                        n_decision_vars = len(args[0])
-                        initial_x = args[0]
+                        initial_x = list(args[0])
                     else:
                         for param in sig.parameters.values():
                             if param.default is not inspect.Parameter.empty and hasattr(param.default, '__len__'):
-                                n_decision_vars = len(param.default)
-                                initial_x = param.default
+                                initial_x = list(param.default)
                                 break
-                        else:
-                            n_decision_vars = 5
 
-                    # Run simulation once to validate output structure
-                    simulation_fn(initial_x)
-                    n_prefix_items = 2  # env, objects
-
-                    # Create population-wide data structures to store objective scores for a_fine_aggregator
-                    population_scores = {}  # Will store scores for each objective across the population
-                    population_raw_data = {}  # Will store raw simulation data for debugging
-                    population_counter = 0  # Count evaluated individuals
-
-                    # Track the objective weights properly across all stakeholders
-                    objective_total_weights = dict.fromkeys(all_objectives, 0.0)
-
-                    # Pre-compute total weights for each objective across all stakeholders
-                    for s_idx, s_id in enumerate(sorted(self.preference_functions.keys())):
-                        s_weight = self.stakeholder_weights[s_idx]
-                        obj_weights = self.objective_weights[s_id]
-                        for obj in all_objectives:
-                            if obj in self.preference_functions[s_id]:
-                                obj_weight = obj_weights.get(obj, 1.0)
-                                objective_total_weights[obj] += s_weight * obj_weight
-
-                    # Normalize objective weights to sum to 1
-                    total_weight = sum(objective_total_weights.values())
-                    norm_objective_weights = {obj: w / total_weight for obj, w in objective_total_weights.items()}
-
-                    # Create list of normalized weights in same order as all_objectives
-                    weights_list = [norm_objective_weights[obj] for obj in all_objectives]
-
-                    def fitness_function(x):
-                        nonlocal population_counter
-
-                        # Convert x to list if needed
-                        if hasattr(x, 'tolist'):
-                            x = x.reshape(-1).tolist()
-                        elif isinstance(x, np.ndarray):
-                            x = x.flatten().tolist()
-
-                        # Check constraints
-                        for constraint in self.constraints:
-                            if not constraint(x):
-                                return float('inf')  # Penalize infeasible solutions
-
-                        # Run simulation
+                    def evaluate(x):
                         sim_results = simulation_fn(x)
-                        objective_values = sim_results[n_prefix_items:]
+                        performance_values = sim_results[N_PREFIX_ITEMS:]
+                        if len(performance_values) < len(objectives):
+                            raise ValueError(
+                                f"The simulation returned {len(performance_values)} objective values, "
+                                f"expected {len(objectives)} for {objectives}."
+                            )
+                        performance = dict(zip(objectives, performance_values))
+                        return [float(np.squeeze(pf(performance[obj]))) for obj, pf, _ in rows]
 
-                        # Map objectives to names
-                        objective_dict = {}
-                        for i, name in enumerate(all_objectives):
-                            if i < len(objective_values):
-                                objective_dict[name] = objective_values[i]
-                            else:
-                                raise ValueError(f"Not enough objective values returned. Expected '{name}'")
-
-                        # Store raw data for debugging
-                        solution_id = population_counter
-                        population_raw_data[solution_id] = {
-                            'x': x.copy() if hasattr(x, 'copy') else x[:],
-                            'objectives': objective_dict.copy()
-                        }
-
-                        # Calculate preference scores for each objective
-                        objective_scores = dict.fromkeys(all_objectives, 0.0)
-
-                        # For each stakeholder, calculate preference scores
-                        for s_idx, s_id in enumerate(sorted(self.preference_functions.keys())):
-                            s_prefs = self.preference_functions[s_id]
-                            s_weight = self.stakeholder_weights[s_idx]
-                            obj_weights = self.objective_weights[s_id]
-
-                            for obj in all_objectives:
-                                if obj in s_prefs:
-                                    # Calculate weighted preference score
-                                    pref_score = s_prefs[obj](objective_dict[obj])
-                                    obj_weight = obj_weights.get(obj, 1.0)
-                                    weight = s_weight * obj_weight
-
-                                    # Add to the objective score (weighted by stakeholder)
-                                    objective_scores[obj] += weight * pref_score
-
-                        # Now normalize each objective score by dividing by total weight for that objective
-                        for obj in all_objectives:
-                            if objective_total_weights[obj] > 0:
-                                objective_scores[obj] /= objective_total_weights[obj]
-
-                        # Store preference scores for this solution in the population
-                        scores_list = [objective_scores[obj] for obj in all_objectives]
-                        if solution_id not in population_scores:
-                            population_scores[solution_id] = scores_list
-
-                        # Increment population counter
-                        population_counter += 1
-
-                        # If we have fewer than 2 solutions, just return a temporary score using weighted sum
-                        if len(population_scores) < 2:
-                            # Without enough population members, can't use a_fine_aggregator yet
-                            # Use weighted sum as a fallback
-                            weighted_sum = sum(w * s for w, s in zip(weights_list, scores_list))
-                            return -weighted_sum  # Negative for minimization
-
-                        # Use a_fine_aggregator with the entire population
-                        try:
-                            # Convert population_scores to 2D array:
-                            # rows = objectives, columns = population members
-                            p_array = np.zeros((len(all_objectives), len(population_scores)))
-
-                            for j, solution_id in enumerate(sorted(population_scores.keys())):
-                                for i, _obj in enumerate(all_objectives):
-                                    p_array[i, j] = population_scores[solution_id][i]
-
-                            # Get aggregated scores for all solutions
-                            # This evaluates the entire population at once!
-                            aggregated_scores = a_fine_aggregator(weights_list, p_array)
-
-                            # WHAT HAPPENS NEXT:
-                            # 1. We extract just the score for the current solution being evaluated
-                            # 2. We return the negative of this score (because we're minimizing)
-                            # 3. This score is used by the GA to rank this individual
-                            return -aggregated_scores[solution_id % len(aggregated_scores)]
-
-                        except Exception as e:
-                            # Fallback to weighted sum
-                            weighted_sum = sum(w * s for w, s in zip(weights_list, scores_list))
-                            print(f"Aggregation failed: {str(e)}, using weighted sum: {weighted_sum}")
-                            return -weighted_sum
-
-                    value_range = self.value_range
-                    individual_shape = n_decision_vars
-                    options = dict(self.optimization_options)
-                    if self.variable_types is not None:
-                        options['variable_types'] = self.variable_types
-                    if isinstance(value_range, list) and len(value_range) == n_decision_vars:
-                        options['per_variable_value_range'] = value_range
-                        value_range_for_optimizer = value_range
-                    else:
-                        value_range_for_optimizer = value_range
-
-                    # Run optimization
-                    result = run_optimization(
-                        fitness_function=fitness_function,
-                        individual_shape=individual_shape,
-                        value_range=value_range_for_optimizer,
-                        options=options
+                    result = run_imap_optimization(
+                        evaluate=evaluate,
+                        weights=row_weights,
+                        value_range=self.value_range,
+                        variable_types=self.variable_types,
+                        constraints=self.constraints,
+                        cons_handler=self.cons_handler,
+                        options=self.optimization_options,
+                        start_point=initial_x,
                     )
 
-                    if result is None:
-                        print("Optimization failed")
-                        return None
-
-                    best_x = result['best_solution'].reshape(-1).tolist()
+                    best_x = result['best_solution']
                     final_results = simulation_fn(best_x)
-
-                    # Calculate final utility for the best solution for clearer reporting
-                    # Re-run the simulation with best solution to get objective values
-                    objective_values = final_results[n_prefix_items:]
-                    objective_dict = {}
-                    for i, name in enumerate(all_objectives):
-                        if i < len(objective_values):
-                            objective_dict[name] = objective_values[i]
-
-                    # Calculate preference scores for final solution
-                    final_scores = []
-                    for obj in all_objectives:
-                        obj_score = 0
-                        obj_weight_total = 0
-
-                        for s_idx, s_id in enumerate(sorted(self.preference_functions.keys())):
-                            if obj in self.preference_functions[s_id]:
-                                s_weight = self.stakeholder_weights[s_idx]
-                                obj_weight = self.objective_weights[s_id].get(obj, 1.0)
-                                pref_score = self.preference_functions[s_id][obj](objective_dict[obj])
-
-                                obj_score += s_weight * obj_weight * pref_score
-                                obj_weight_total += s_weight * obj_weight
-
-                        if obj_weight_total > 0:
-                            final_scores.append(obj_score / obj_weight_total)
-
-                    # Calculate weighted sum for final utility
-                    final_utility = sum(w * s for w, s in zip(weights_list, final_scores))
-
-                    print(f"Final objective values: {objective_dict}")
-                    print(f"Final preference scores: {final_scores}")
-                    print(f"Final weights: {weights_list}")
-                    print(f"Final utility (weighted sum): {final_utility}")
-
-                    # Display final population data for verification (optional)
-                    print(f"Total solutions evaluated: {population_counter}")
+                    print(f"Final IMAP utility (within the hall of fame): {result['utility']}")
 
                     return {
                         'x_opt': best_x,
-                        'utility': final_utility,  # Use positive calculated utility instead of -best_fitness
+                        'utility': result['utility'],
                         'simulation_results': final_results
                     }
 

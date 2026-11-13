@@ -130,7 +130,7 @@ def create_individual_default(shape, value_range, options=None):
         raise ValueError("value_range must be a list of tuples matching the number of variables.")
     individual = []
     for i in range(size):
-        vtype = variable_types[i] if variable_types else int
+        vtype = variable_types[i] if variable_types else float
         min_value, max_value = value_range[i]
         if vtype in [int, 'int']:
             val = random.randint(int(min_value), int(max_value))
@@ -291,7 +291,7 @@ def mutate_individual_default(individual, mutation_rate, value_range, options=No
         raise ValueError("value_range must be a list of tuples matching the number of variables.")
     for i in range(mutated.shape[0]):
         if random.random() < mutation_rate:
-            vtype = variable_types[i] if variable_types else int
+            vtype = variable_types[i] if variable_types else float
             min_value, max_value = value_range[i]
             if vtype in [int, 'int']:
                 mutated[i] = random.randint(int(min_value), int(max_value))
@@ -518,12 +518,13 @@ def custom_eaMuPlusLambda(population, toolbox, mu, lambda_, cxpb, mutpb, ngen, s
         evolved population
 
     halloffame : deap.tools.HallOfFame, optional
-        A hall of fame object that retains the best individuals across generations.
-        NOTE: the Hall of Fame is a general Genetic Algorithm (DEAP) mechanism for
-        elitism / best tracking. It is part of the GA backbone and is *not* a foundational
-        IGS term; the IGS method itself is the IMAP aggregation (see a_fine_aggregator).
-        The Hall of Fame here only carries elite individuals forward — every preference
-        ordering it relies on is produced by the IMAP aggregator.
+        Cross-generational candidate set (realised as a DEAP HallOfFame).
+        Retains the highest-scoring individuals seen across all completed generations;
+        at each generation these are re-injected into the IMAP evaluation pool so that
+        Z-score normalisation in ``a_fine_aggregator`` is always informed by the
+        best-found solutions, regardless of when they were discovered.
+        Note: HallOfFame is a general GA concept; all preference ordering is produced
+        by the IMAP aggregator (``a_fine_aggregator``).
 
     verbose : bool, optional
         Whether to print the statistics of each generation
@@ -563,8 +564,6 @@ def custom_eaMuPlusLambda(population, toolbox, mu, lambda_, cxpb, mutpb, ngen, s
     if verbose:
         print(logbook.stream)
 
-    len_hof = len(halloffame) if halloffame is not None else 0
-
     for gen in range(1, ngen + 1):
         # Generate offspring
         offspring = custom_varOr(population, toolbox, lambda_, cxpb, mutpb)
@@ -577,32 +576,50 @@ def custom_eaMuPlusLambda(population, toolbox, mu, lambda_, cxpb, mutpb, ngen, s
                 ind.fitness = creator.FitnessMin()
             ind.fitness.values = fit
 
-        # Combine offspring and population with elite individuals
-        elite_hof = [toolbox.clone(ind) for ind in halloffame[:len_hof]]
-        halloffame_candidates = offspring + elite_hof + population
+        # Combine offspring and population with cross-generational elite candidates
+        cross_gen_elites = [toolbox.clone(ind) for ind in halloffame] if halloffame is not None else []
+        candidate_pool = offspring + cross_gen_elites + population
 
-        # Re-evaluate all candidates together (relative)
-        fitnesses_hof = list(map(toolbox.evaluate, halloffame_candidates))
-        for ind, fit in zip(halloffame_candidates, fitnesses_hof):
+        # Re-evaluate all candidates together (relative IMAP scoring)
+        fitnesses_hof = list(map(toolbox.evaluate, candidate_pool))
+        for ind, fit in zip(candidate_pool, fitnesses_hof):
             ind.fitness.values = fit
 
-        # Update Hall of Fame
+        if halloffame is None:
+            population[:] = toolbox.select(population + offspring, mu)
+            record = stats.compile(population) if stats else {}
+            logbook.record(gen=gen, nevals=len(offspring), **record)
+            continue
+
+        # Update cross-generational candidate set
         halloffame.clear()  # start fresh
-        halloffame.update(halloffame_candidates)
+        halloffame.update(candidate_pool)
 
         # Select next generation from best individuals
         population[:] = toolbox.select(population + offspring + halloffame.items, mu)
 
-        # Re-evaluate sorted HOF (needed for convergence check)
-        fitnesses_hof_sorted = list(map(toolbox.evaluate, halloffame))
+        # Use cached Hall-of-Fame fitness values for convergence check.
+        # Re-evaluating members one-by-one is unsafe for pool-dependent fitness
+        # functions because the reference pool changes between calls.
+        hof_fitness_values = [
+            ind.fitness.values[0]
+            for ind in halloffame
+            if hasattr(ind, 'fitness') and getattr(ind.fitness, 'valid', False)
+        ]
 
-        percent_diff = abs(fitnesses_hof_sorted[0][0] - fitnesses_hof_sorted[-1][0])
-        if percent_diff < 0.1:
+        if len(hof_fitness_values) >= 2:
+            percent_diff = abs(min(hof_fitness_values) - max(hof_fitness_values))
+        else:
+            percent_diff = 0.0
+        # Avoid premature stopping from early-generation ties when relative
+        # fitness values can still be unstable.
+        min_gen_for_convergence = 3
+        if gen >= min_gen_for_convergence and percent_diff < 0.1:
             print(f"Stopping early at generation {gen} due to convergence.")
             break
         else:
             print(
-                f"Generation {gen}: Difference in relative utility score between best and worst individual is {percent_diff:.2f}% of the GA Hall of Fame.")
+                f"Generation {gen}: Spread of IMAP aggregated preference scores within the cross-generational candidate set is {percent_diff:.2f}.")
 
         record = stats.compile(population) if stats else {}
         logbook.record(gen=gen, nevals=len(offspring), **record)
@@ -805,25 +822,16 @@ def run_optimization(fitness_function, individual_shape, value_range, options=No
     toolbox.register("mutate", wrapped_mutate)
     toolbox.register("select", tools.selTournament, tournsize=tournsize)
 
-    # Create initial population
+    # Create initial population (evaluated inside custom_eaMuPlusLambda)
     population = toolbox.population(n=pop_size)
-
-    # Debug information
-    print("Created initial population")
-
-    # Explicitly evaluate all individuals
-    print("Evaluating initial population...")
-    fitnesses = list(map(toolbox.evaluate, population))
-    for ind, fit in zip(population, fitnesses):
-        ind.fitness.values = fit
-
-    print("Initial population evaluated")
 
     # Run the algorithm
     try:
-        # Create Hall of Fame to store best individuals.
-        # NOTE: Hall of Fame is a general GA-backbone mechanism (DEAP) for elitism /
-        # best tracking; it is not part of the IGS (IMAP) method itself.
+        # Create the cross-generational candidate set (realised as a DEAP HallOfFame).
+        # Best-scoring individuals found across all generations are retained here and
+        # re-injected into the IMAP evaluation pool at every generation to stabilise
+        # Z-score normalisation and carry the best-found solutions forward.
+        # (HallOfFame is a general GA concept; all ranking is done by the IMAP aggregator.)
         if hall_of_fame_size == 0:
             hof = None
         else:
