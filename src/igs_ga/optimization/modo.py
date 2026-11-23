@@ -6,7 +6,10 @@ from typing import Callable, Dict, List, Optional, Union
 
 import numpy as np
 
-from igs_ga.optimization.imap import normalize_constraints, run_imap_optimization
+from igs_ga.optimization.optimization import (
+    normalize_constraints,
+    run_imap_optimization,
+)
 
 N_PREFIX_ITEMS = 2  # simulation returns (env, objects, *performance_values)
 
@@ -45,7 +48,7 @@ class Preferendus:
 
     optimization_options : Dict, optional
         A dictionary specifying Genetic Algorithm parameters:
-        - population_size (int): Number of individuals in the GA population (default: 20)
+        - population_size (int): Number of individuals in the GA population (default: 100)
         - generations (int): Maximum number of generations to run the GA (default: 10)
         - crossover_rate (float): Probability that a float variable is crossed over (default: 0.7)
         - mutation_rate (float): Probability that a child is mutated; the per-gene mutation rate
@@ -147,7 +150,7 @@ class Preferendus:
 
         # Default optimization options
         self.optimization_options = {
-            'population_size': 20,
+            'population_size': 100,
             'generations': 10,
             'crossover_rate': 0.7,
             'mutation_rate': 1.0,
