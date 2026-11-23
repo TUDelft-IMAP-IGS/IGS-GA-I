@@ -33,7 +33,7 @@ def test_preferendus_initialization():
     )
 
     # Check default optimization options
-    assert modo.optimization_options.get("population_size") == 20
+    assert modo.optimization_options.get("population_size") == 100
     assert modo.optimization_options.get("generations") == 10
 
 

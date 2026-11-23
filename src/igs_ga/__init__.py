@@ -6,6 +6,6 @@ preference aggregation directly into standard GA survival selection, exposing th
 ``Preferendus`` decorator as the user-facing interface.
 """
 
-from igs_ga.optimization import Preferendus, a_fine_aggregator, run_optimization
+from igs_ga.optimization import Preferendus, a_fine_aggregator
 
-__all__ = ["Preferendus", "run_optimization", "a_fine_aggregator"]
+__all__ = ["Preferendus", "a_fine_aggregator"]
